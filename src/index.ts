@@ -29,7 +29,6 @@ const modController = new ModerationController(
     userCache
 );
 
-console.log('[Setup]: Services & Controllers initialized.');
 
 // ==========================================
 // BOT LISTENERS
@@ -124,13 +123,17 @@ bot.on('chat_join_request', async (ctx) => {
 
 bot.command('start', async (ctx) => {
     const botInfo = await bot.api.getMe();
-    const welcomeText = 
+    const welcomeText =
         `👋 **Hello! I am ${botInfo.first_name}**\n\n` +
         `🛡️ I am an AI-powered moderation bot designed to protect your groups from NSFW (18+) content.\n\n` +
         `🔍 **What I can do:**\n` +
-        `• Scan profile photos of new members\n` +
+        `• Scan profile photos of new and existing members\n` +
         `• Monitor stickers and photos in real-time\n` +
         `• Block NSFW reactions and custom emojis\n\n` +
+        `⚙️ **Admin Commands (in group):**\n` +
+        `• /unban <user\\_id> — Unban a wrongly banned user\n` +
+        `• /clear\\_cache — Clear scanned user cache for this group\n` +
+        `• /stats — View bot cache statistics\n\n` +
         `🚀 **To get started:**\n` +
         `1. Press the button below to add me to your group.\n` +
         `2. Grant me **Administrator** rights (Ban users & Delete messages).\n` +
@@ -151,6 +154,11 @@ bot.command('clear_cache', async (ctx) => {
     if (!ctx.from) return;
 
     if (ctx.chat.type === 'private') {
+        const ownerId = parseInt(process.env.OWNER_ID || '0');
+        if (!ownerId || ctx.from.id !== ownerId) {
+            await ctx.reply('❌ This command is for the bot owner only.');
+            return;
+        }
         scanCache.flushAll();
         modController.userCache.flushAll();
         await ctx.reply('✅ All global caches cleared!');
@@ -170,6 +178,61 @@ bot.command('clear_cache', async (ctx) => {
         console.error('[Clear Cache Error]:', (e as Error).message);
         await ctx.reply('❌ An error occurred.');
     }
+});
+
+bot.command('unban', async (ctx) => {
+    if (!ctx.from || ctx.chat.type === 'private') {
+        await ctx.reply('❌ This command can only be used in a group.');
+        return;
+    }
+
+    const admin = await modController.isAdminOrOwner(ctx.chat.id, ctx.from.id);
+    if (!admin) {
+        await ctx.reply('❌ This command is restricted to admins.');
+        return;
+    }
+
+    const args = ctx.message?.text?.split(' ');
+    const targetId = args?.[1] ? parseInt(args[1]) : null;
+
+    if (!targetId || isNaN(targetId)) {
+        await ctx.reply('❌ Usage: /unban <user_id>\nExample: /unban 123456789');
+        return;
+    }
+
+    try {
+        await guardService.unbanUser(ctx.chat.id, targetId);
+        const cacheKey = `${ctx.chat.id}:${targetId}`;
+        modController.userCache.delete(cacheKey);
+        await ctx.reply(`✅ User ${targetId} has been unbanned and removed from cache.`);
+    } catch (e) {
+        console.error('[Unban Error]:', (e as Error).message);
+        await ctx.reply('❌ Failed to unban user.');
+    }
+});
+
+bot.command('stats', async (ctx) => {
+    if (!ctx.from) return;
+
+    if (ctx.chat.type !== 'private') {
+        const admin = await modController.isAdminOrOwner(ctx.chat.id, ctx.from.id);
+        if (!admin) {
+            await ctx.reply('❌ This command is restricted to admins.');
+            return;
+        }
+    }
+
+    const totalUserCache = modController.userCache.keys().length;
+    const scanCacheStats = scanCache.getStats();
+
+    const text =
+        `📊 **Bot Cache Stats**\n\n` +
+        `👤 User profiles cached: ${totalUserCache}\n` +
+        `🖼️ Media scans cached: ${scanCacheStats.keys}\n` +
+        `✅ Cache hits: ${scanCacheStats.hits}\n` +
+        `❌ Cache misses: ${scanCacheStats.misses}`;
+
+    await ctx.reply(text, { parse_mode: 'Markdown' });
 });
 
 bot.command('test', async (ctx) => {

@@ -7,9 +7,11 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
+    "build": "tsc",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "@tensorflow/tfjs": "^4.22.0",
     "axios": "^1.7.9",
     "dotenv": "^16.4.7",
@@ -17,7 +19,6 @@
     "jpeg-js": "^0.4.4",
     "node-cache": "^5.1.2",
     "nsfwjs": "^4.3.0",
-    "openai": "^4.86.2",
     "sharp": "^0.33.5"
   },
   "devDependencies": {

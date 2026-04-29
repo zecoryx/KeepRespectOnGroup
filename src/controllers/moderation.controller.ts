@@ -38,7 +38,6 @@ export class ModerationController {
             } else if (aiStatus === 'NO') {
                 this.scanCache.set(fileUniqueId, 'SAFE');
             }
-            // If ERROR (blind API), do nothing. Do not cache so it can be retried.
         } catch (error) {
             console.error('[Scan Error]:', (error as Error).message);
         }
@@ -68,7 +67,6 @@ export class ModerationController {
 
         if (this.userCache.has(cacheKey)) return false;
 
-        // Skip bot's own profile
         if (userId === this.bot.botInfo.id) {
             this.userCache.set(cacheKey, 'SAFE');
             return false;
@@ -77,11 +75,8 @@ export class ModerationController {
         const admin = await this.isAdminOrOwner(chatId, userId);
         if (admin) {
             this.userCache.set(cacheKey, 'SAFE');
-            console.log(`[User Check]: User ${userId} is admin/owner — skipped.`);
             return false;
         }
-
-        console.log(`[User Check]: Scanning profile of user ${userId} in chat ${chatId}...`);
 
         try {
             const photos = await withTimeout(
@@ -92,7 +87,6 @@ export class ModerationController {
 
             if (photos.total_count === 0) {
                 this.userCache.set(cacheKey, 'SAFE');
-                console.log(`[User Check]: User ${userId} no photo — skipped.`);
                 return false;
             }
 
@@ -107,13 +101,11 @@ export class ModerationController {
             const aiStatus = await this.aiService.analyzeNSFW(base64);
 
             if (aiStatus === 'YES') {
-                console.log(`[User Check]: User ${userId} NSFW profile. Banning...`);
                 await this.guardService.banUser(chatId, userId, 'NSFW Profile Photo');
                 this.userCache.set(cacheKey, 'NSFW');
                 return true;
             } else if (aiStatus === 'NO') {
                 this.userCache.set(cacheKey, 'SAFE');
-                console.log(`[User Check]: User ${userId} safe.`);
             }
 
         } catch (error) {

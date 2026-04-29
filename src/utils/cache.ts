@@ -10,14 +10,15 @@ interface CacheEntry {
     timestamp: number;
 }
 
-// 7-day TTL (milliseconds)
-const TTL = 7 * 24 * 60 * 60 * 1000;
+// SAFE: re-check after 30 days (normal users rarely change their photo).
+// NSFW: keep banned accounts locked out for 90 days.
+const SAFE_TTL = 30 * 24 * 60 * 60 * 1000;
+const NSFW_TTL = 90 * 24 * 60 * 60 * 1000;
 
-/**
- * File-based persistent cache using non-blocking asynchronous I/O.
- * Data survives bot restarts.
- * Stored per group using "chatId:userId" format.
- */
+function ttlFor(status: 'SAFE' | 'NSFW'): number {
+    return status === 'NSFW' ? NSFW_TTL : SAFE_TTL;
+}
+
 export class PersistentCache {
     private cache: Record<string, CacheEntry> = {};
     private saveTimeout: NodeJS.Timeout | null = null;
@@ -26,21 +27,12 @@ export class PersistentCache {
         this.loadSync();
     }
 
-    /**
-     * Initial load is synchronous to ensure cache is ready before bot starts.
-     */
     private loadSync(): void {
         try {
-            if (!existsSync(DATA_DIR)) {
-                mkdirSync(DATA_DIR, { recursive: true });
-            }
+            if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
             if (existsSync(CACHE_FILE)) {
-                const raw = readFileSync(CACHE_FILE, 'utf-8');
-                this.cache = JSON.parse(raw);
+                this.cache = JSON.parse(readFileSync(CACHE_FILE, 'utf-8'));
                 this.cleanup();
-                console.log(`[Cache]: Loaded ${Object.keys(this.cache).length} entries.`);
-            } else {
-                console.log('[Cache]: New cache file created.');
             }
         } catch (error) {
             console.error('[Cache Load Error]:', error);
@@ -48,46 +40,36 @@ export class PersistentCache {
         }
     }
 
-    /**
-     * Triggers a debounced asynchronous save to disk.
-     */
     private triggerSave(): void {
         if (this.saveTimeout) return;
-
         this.saveTimeout = setTimeout(async () => {
             try {
-                const data = JSON.stringify(this.cache, null, 2);
-                await fs.writeFile(CACHE_FILE, data, 'utf-8');
-                this.saveTimeout = null;
+                await fs.writeFile(CACHE_FILE, JSON.stringify(this.cache, null, 2), 'utf-8');
             } catch (error) {
-                console.error('[Cache Async Save Error]:', error);
+                console.error('[Cache Save Error]:', error);
+            } finally {
                 this.saveTimeout = null;
             }
-        }, 1000); // Wait 1 second before saving to batch multiple updates
+        }, 1000);
     }
 
-    /** Clear expired cache entries */
     private cleanup(): void {
         const now = Date.now();
         let removed = 0;
         for (const key of Object.keys(this.cache)) {
-            if (now - this.cache[key].timestamp > TTL) {
+            const entry = this.cache[key];
+            if (now - entry.timestamp > ttlFor(entry.status)) {
                 delete this.cache[key];
                 removed++;
             }
         }
-        if (removed > 0) {
-            this.triggerSave();
-            console.log(`[Cache]: Cleared ${removed} expired entries.`);
-        }
+        if (removed > 0) this.triggerSave();
     }
 
     has(key: string): boolean {
         const entry = this.cache[key];
         if (!entry) return false;
-        
-        // TTL Check
-        if (Date.now() - entry.timestamp > TTL) {
+        if (Date.now() - entry.timestamp > ttlFor(entry.status)) {
             delete this.cache[key];
             this.triggerSave();
             return false;
@@ -105,7 +87,13 @@ export class PersistentCache {
         this.triggerSave();
     }
 
-    /** Clear cache for a specific group */
+    delete(key: string): void {
+        if (this.cache[key]) {
+            delete this.cache[key];
+            this.triggerSave();
+        }
+    }
+
     clearGroup(chatId: string): number {
         let cleared = 0;
         for (const key of Object.keys(this.cache)) {
@@ -118,7 +106,6 @@ export class PersistentCache {
         return cleared;
     }
 
-    /** Clear all cache entries */
     flushAll(): void {
         this.cache = {};
         this.triggerSave();

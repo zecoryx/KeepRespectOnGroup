@@ -14,38 +14,22 @@ export class MediaHelper {
      */
     async downloadAsBase64(fileId: string): Promise<string> {
         try {
-            console.log(`[Media]: Getting file info for ${fileId.substring(0, 20)}...`);
             const file = await this.api.getFile(fileId);
             const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_TOKEN}/${file.file_path}`;
-            
-            console.log(`[Media]: Downloading ${file.file_path}...`);
-            const response = await axios.get(fileUrl, { 
-                responseType: 'arraybuffer',
-                timeout: 10000, // 10 seconds timeout for downloads
-            });
+            const response = await axios.get(fileUrl, { responseType: 'arraybuffer', timeout: 10000 });
             const buffer = Buffer.from(response.data);
 
-            if (!buffer || buffer.length === 0) {
-                throw new Error('Downloaded buffer is empty');
-            }
+            if (!buffer || buffer.length === 0) throw new Error('Downloaded buffer is empty');
 
-            console.log(`[Media]: Processing ${Math.round(buffer.length / 1024)}KB image...`);
-            
-            // Resize and compress image to optimize for AI processing
+            // 224px — enough for AI classification, ~3x fewer image tokens than 512px
             const processedBuffer = await sharp(buffer)
-                .resize({ width: 512, height: 512, fit: 'inside' })
-                .toFormat('jpeg', { quality: 70 })
+                .resize({ width: 224, height: 224, fit: 'inside' })
+                .toFormat('jpeg', { quality: 60 })
                 .toBuffer();
 
-            const base64 = processedBuffer.toString('base64');
-            console.log(`[Media]: Ready — ${Math.round(base64.length / 1024)}KB base64`);
-            return base64;
+            return processedBuffer.toString('base64');
         } catch (error: any) {
-            if (error.code === 'ECONNABORTED') {
-                console.error('[Media Timeout]: Failed to download image within 10s.');
-            } else {
-                console.error('[Media Error]:', error.message);
-            }
+            console.error('[Media Error]:', error.message);
             throw error;
         }
     }
@@ -56,9 +40,7 @@ export class MediaHelper {
     async getCustomEmojiBase64(customEmojiId: string): Promise<string | null> {
         try {
             const stickers = await this.api.getCustomEmojiStickers([customEmojiId]);
-            if (stickers.length > 0) {
-                return await this.downloadAsBase64(stickers[0].file_id);
-            }
+            if (stickers.length > 0) return await this.downloadAsBase64(stickers[0].file_id);
             return null;
         } catch (error: any) {
             console.error('[Media Emoji Error]:', error.message);
