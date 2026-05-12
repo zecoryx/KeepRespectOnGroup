@@ -10,8 +10,6 @@ interface CacheEntry {
     timestamp: number;
 }
 
-// SAFE: re-check after 30 days (normal users rarely change their photo).
-// NSFW: keep banned accounts locked out for 90 days.
 const SAFE_TTL = 30 * 24 * 60 * 60 * 1000;
 const NSFW_TTL = 90 * 24 * 60 * 60 * 1000;
 
@@ -22,6 +20,8 @@ function ttlFor(status: 'SAFE' | 'NSFW'): number {
 export class PersistentCache {
     private cache: Record<string, CacheEntry> = {};
     private saveTimeout: NodeJS.Timeout | null = null;
+    private isSaving: boolean = false;
+    private hasPendingSave: boolean = false;
 
     constructor() {
         this.loadSync();
@@ -35,20 +35,38 @@ export class PersistentCache {
                 this.cleanup();
             }
         } catch (error) {
-            console.error('[Cache Load Error]:', error);
+            console.error('[Cache Load Error]: Corrupted cache or permission denied. Starting fresh.');
             this.cache = {};
         }
     }
 
+    /**
+     * Hardened: Safe async state machine to prevent data loss or file corruption on overlapping writes.
+     */
     private triggerSave(): void {
         if (this.saveTimeout) return;
         this.saveTimeout = setTimeout(async () => {
+            this.saveTimeout = null;
+            
+            if (this.isSaving) {
+                this.hasPendingSave = true;
+                return;
+            }
+            
+            this.isSaving = true;
             try {
-                await fs.writeFile(CACHE_FILE, JSON.stringify(this.cache, null, 2), 'utf-8');
+                // Use a temporary file and rename to prevent corruption on crash
+                const tempFile = `${CACHE_FILE}.tmp`;
+                await fs.writeFile(tempFile, JSON.stringify(this.cache, null, 2), 'utf-8');
+                await fs.rename(tempFile, CACHE_FILE);
             } catch (error) {
-                console.error('[Cache Save Error]:', error);
+                console.error('[Cache Save Error]: Failed to persist cache to disk.');
             } finally {
-                this.saveTimeout = null;
+                this.isSaving = false;
+                if (this.hasPendingSave) {
+                    this.hasPendingSave = false;
+                    this.triggerSave();
+                }
             }
         }, 1000);
     }

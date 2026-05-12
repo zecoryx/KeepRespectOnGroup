@@ -1,86 +1,59 @@
-# KeepRSPCT - Telegram Moderation Bot
+# KeepRSPCT — Clean Code Architecture
 
-KeepRSPCT is a high-performance, AI-driven Telegram moderation bot designed to protect communities from NSFW (Not Safe For Work) content. Built with **SOLID** principles, local persistent caching, and advanced AI vision models, it efficiently handles high-traffic groups while maintaining pinpoint accuracy.
+KeepRSPCT is a production-grade Telegram moderation bot built with a strict layered architecture. It leverages Google Gemini's vision capabilities to provide real-time, AI-powered NSFW protection for community groups.
 
-![KeepRSPCT Infrastructure Diagram](https://img.shields.io/badge/Architecture-SOLID-blue) ![Caching](https://img.shields.io/badge/Caching-Persistent_&_In_Memory-green) ![TypeScript](https://img.shields.io/badge/Language-TypeScript-blue)
+---
 
-## Core Features
+## 🏗️ Architecture Deep Dive
 
-- **Advanced AI Vision Validation:** Uses Multimodal LLMs (like GLM-5 or GPT-4-Vision) to scan profile photos, group messages, stickers, and custom emoji reactions.
-- **Hallucination & Blindness Defensive Checks:** Includes rigid guardrails to bypass AI safety filters effectively (via description extraction rather than boolean Q&A) and safely skips scans if the API goes temporarily blind.
-- **Smart Per-Group Caching:** Integrates both `node-cache` (for fast message scans) and a custom `PersistentCache` relying on asynchronous file I/O to survive server restates. Users are evaluated once per group per week.
-- **Zero False-Positive Target:** Excludes "ordinary selfies" or regular "skin" exposure by using highly tuned Regex filtering applied strictly over the AI's internal target descriptions.
-- **Concurrent Traffic Queues:** AI request semaphores ensure you never flood the LLM API endpoints during traffic spikes.
-- **Anti-Spam Admin Bypass:** Group owners and administrators bypass AI checks entirely to optimize API cost.
+The project follows a modular **Layered Architecture** to ensure separation of concerns, testability, and long-term maintainability.
 
-## Quick Start
+### 1. Controller Layer (`src/controllers/`)
+The `ModerationController` acts as the orchestrator. It listens to Telegram events (via `index.ts`), validates the basic request state, and coordinates between various services. It contains no direct business logic regarding AI analysis or low-level API calls.
 
-### 1. Requirements
+### 2. Service Layer (`src/services/`)
+- **AIService:** Encapsulates the logic for interacting with Google's Generative AI. It manages request queueing, rate-limit backoff, and multi-key failover logic.
+- **GuardService:** Manages the enforcement of moderation rules (banning, unbanning, deleting messages).
 
-- Node.js v18+
-- TypeScript
-- A Telegram Bot Token (from [@BotFather](https://t.me/BotFather))
-- An AI API Key supporting Vision models (FlowClad, Zhipu GLM, or OpenAI)
+### 3. Utility Layer (`src/utils/`)
+- **PersistentCache:** A repository-like pattern for long-term data storage, ensuring user profile statuses are preserved across restarts.
+- **MediaHelper:** Handles the heavy lifting of media acquisition and preprocessing via worker threads.
+- **Config & Constants:** Centralized management of environment variables and magic strings.
 
-### 2. Installation
+---
 
-Clone the repository and install the dependencies:
+## 🛠️ Tech Stack & Rationale
 
-```bash
-git clone https://github.com/zecoryx/KeepRSPCT.git
-cd KeepRSPCT
-npm install
-```
+- **GrammY:** Chosen for its lightweight, high-performance middleware system and first-class TypeScript support.
+- **Google Gemini 2.0 Flash:** Provides state-of-the-art vision analysis with sub-second latency and a generous free tier for community bots.
+- **Sharp:** The industry standard for high-speed image processing, utilized here via worker threads to keep the Node.js event loop responsive.
+- **Node-Cache:** Provides an extremely fast L1 memory layer for recent media scans.
 
-### 3. Configuration
+---
 
-Copy the sample environment file and add your credentials:
+## 🔄 Core Logic Flow
 
-```bash
-cp .env.example .env
-```
+1. **Ingress:** A photo, sticker, or reaction is received by the `grammy` bot.
+2. **L1 Cache Lookup:** The `ModerationController` checks if the media's `file_unique_id` is already in the memory cache.
+3. **Admin Validation:** The bot verifies if the sender is an administrator (admins are exempt from scanning to save API quota).
+4. **Media Processing:** If not cached, the `MediaHelper` downloads the media and spawns a **Worker Thread** to resize/reformat the image into an AI-optimized JPEG.
+5. **AI Evaluation:** The `AIService` acquires a slot in the `RequestQueue` and sends the processed image to Gemini.
+6. **Enforcement:** If NSFW is detected, the `GuardService` executes a parallel `deleteMessage` and `banChatMember` operation.
+7. **L2 Persistance:** The result is saved to `user_cache.json` to ensure the user is blocked from re-joining.
 
-Update `.env`:
+---
 
-```env
-BOT_TOKEN=your_telegram_bot_token_here
-AI_API_KEY=your_vision_api_key_here
-AI_BASE_URL=https://api.flowclad.zecoryx.uz/v1/chat/completions
-AI_MODEL=model_name
-```
+## 🛡️ Edge Case Handling
 
-### 4. Running the Bot
+- **Atomic Writes:** Cache persistence uses a `temp-file -> rename` strategy to prevent data corruption during crashes.
+- **Race Condition Guard:** "In-Flight Request Tracking" ensures that multiple simultaneous messages from a single new user don't trigger duplicate AI requests.
+- **Fail-Safe Processing:** If an AI key fails or a rate limit is hit, the system automatically rotates to the next available key or implements an exponential backoff.
+- **Image Bomb Protection:** Strict `maxContentLength` and pixel limits are enforced during media download to prevent memory exhaustion attacks.
 
-For development environments (with auto-reload):
+---
 
-```bash
-npm run dev
-```
+## 📈 Future Scalability
 
-For production deployment:
-
-```bash
-npm start
-```
-
-## Under the Hood (Architecture)
-
-KeepRSPCT is built keeping **Clean Code** and **SOLID** architecture in mind:
-
-1.  **Dependency Injection:** `src/index.ts` is purely a bootstrapping entry script that wires Telegram event routes directly into the `ModerationController`.
-2.  **Controller Layer (`moderation.controller.ts`):** Abstracts heavy moderation flows—evaluating logic, delegating cache manipulation, and passing media base64 down to the AI.
-3.  **Services:**
-    - `ai.service.ts`: Handles prompt wrappers, LLM hallucination prevention, regex validations, API timeout configurations, and semaphore HTTP queuing.
-    - `guard.service.ts`: Handles Telegram kick/ban mutations and deletion hooks.
-4.  **Utilities:**
-    - `cache.ts`: Class-based File I/O for persistent, restart-safe data states.
-    - `media.helper.ts`: Memory-efficient buffer loading via `sharp` to convert robust API streams into minimal base64 tokens for the AI endpoints.
-    - `timeout.ts`: Promise-based `Promise.race` handlers preventing deadlocks during high network latency.
-
-## Contributing
-
-Contributions are always welcome! If you think of a new feature or find a bug, please open an Issue or submit a Pull Request. Provide logs and exact `.env` configurations (without keys!) if reporting a bug.
-
-## License
-
-This project is open-sourced under the MIT License.
+- **Database Migration:** The `PersistentCache` is designed to be easily swappable with a `Redis` or `PostgreSQL` implementation as the bot scales to thousands of groups.
+- **Provider Agnostic AI:** The `AIService` can be extended to support OpenAI or Anthropic vision models with minimal changes to the controller logic.
+- **Clustering:** By offloading CPU tasks to workers and using a centralized cache, the bot is ready for horizontal scaling across multiple containers.

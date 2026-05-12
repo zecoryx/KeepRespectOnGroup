@@ -1,12 +1,15 @@
-import { Bot } from 'grammy';
+import { Bot, Context } from 'grammy';
 import NodeCache from 'node-cache';
 import { AIService } from '../services/ai.service.js';
 import { MediaHelper } from '../utils/media.helper.js';
 import { GuardService } from '../services/guard.service.js';
 import { PersistentCache } from '../utils/cache.js';
 import { withTimeout } from '../utils/timeout.js';
+import { STATUS, BOT_MESSAGES, LIMITS } from '../utils/constants.js';
 
 export class ModerationController {
+    private inFlightChecks: Map<string, Promise<boolean>> = new Map();
+
     constructor(
         private bot: Bot,
         private aiService: AIService,
@@ -17,40 +20,72 @@ export class ModerationController {
     ) {}
 
     /**
-     * Scans an image/media and applies necessary moderation actions.
+     * Entry point for image/sticker scanning updates.
      */
     async handleMediaScanning(chatId: number, messageId: number, fromId: number, fileId: string, fileUniqueId: string) {
-        const cachedResult = this.scanCache.get(fileUniqueId);
-        if (cachedResult === 'NSFW') {
-            try { await this.bot.api.deleteMessage(chatId, messageId); } catch {}
-            return;
+        const cached = this.scanCache.get(fileUniqueId);
+        if (cached === STATUS.NSFW) {
+            return this.guardService.deleteMessage(chatId, messageId).catch(() => {});
         }
-        if (cachedResult === 'SAFE') return;
+        if (cached === STATUS.SAFE) return;
 
         try {
             const base64 = await this.mediaHelper.downloadAsBase64(fileId);
-            const aiStatus = await this.aiService.analyzeNSFW(base64);
+            const result = await this.aiService.analyzeNSFW(base64);
 
-            if (aiStatus === 'YES') {
-                this.scanCache.set(fileUniqueId, 'NSFW');
-                try { await this.guardService.deleteMessage(chatId, messageId); } catch {}
-                await this.guardService.banUser(chatId, fromId, '18+ media detected');
-            } else if (aiStatus === 'NO') {
-                this.scanCache.set(fileUniqueId, 'SAFE');
+            if (result === STATUS.YES) {
+                this.scanCache.set(fileUniqueId, STATUS.NSFW);
+                await Promise.all([
+                    this.guardService.deleteMessage(chatId, messageId),
+                    this.guardService.banUser(chatId, fromId, BOT_MESSAGES.BAN_REASON_MEDIA)
+                ]);
+            } else if (result === STATUS.NO) {
+                this.scanCache.set(fileUniqueId, STATUS.SAFE);
             }
-        } catch (error) {
-            console.error('[Scan Error]:', (error as Error).message);
+        } catch (e) {
+            console.error('[Controller]: Media scan failed.');
         }
     }
 
     /**
-     * Verifies if a user is an Admin or Owner (includes 5s timeout).
+     * Handles reaction updates specifically looking for custom emojis.
      */
+    async handleReaction(ctx: Context) {
+        if (!ctx.from || !ctx.chat || !ctx.update.message_reaction) return;
+        
+        const userId = ctx.from.id;
+        const chatId = ctx.chat.id;
+        const reactions = ctx.update.message_reaction.new_reaction || [];
+
+        for (const reaction of reactions) {
+            if (reaction.type !== 'custom_emoji') continue;
+            
+            const emojiId = (reaction as any).custom_emoji_id;
+            const cached = this.scanCache.get(emojiId);
+
+            if (cached === STATUS.NSFW) {
+                return this.guardService.banUser(chatId, userId, BOT_MESSAGES.BAN_REASON_REACTION);
+            }
+            if (cached === STATUS.SAFE) continue;
+
+            const base64 = await this.mediaHelper.getCustomEmojiBase64(emojiId);
+            if (!base64) continue;
+
+            const result = await this.aiService.analyzeNSFW(base64);
+            if (result === STATUS.YES) {
+                this.scanCache.set(emojiId, STATUS.NSFW);
+                await this.guardService.banUser(chatId, userId, BOT_MESSAGES.BAN_REASON_REACTION);
+            } else {
+                this.scanCache.set(emojiId, STATUS.SAFE);
+            }
+        }
+    }
+
     async isAdminOrOwner(chatId: number, userId: number): Promise<boolean> {
         try {
             const member = await withTimeout(
                 this.bot.api.getChatMember(chatId, userId),
-                5000,
+                LIMITS.TIMEOUT_TELEGRAM,
                 'getChatMember'
             );
             return member.status === 'creator' || member.status === 'administrator';
@@ -59,57 +94,46 @@ export class ModerationController {
         }
     }
 
-    /**
-     * Scans user profile photo (with Persistent Cache + Admin Skip + Timeout).
-     */
     async checkUserProfile(userId: number, chatId: number): Promise<boolean> {
-        const cacheKey = `${chatId}:${userId}`;
+        const key = `${chatId}:${userId}`;
+        const cached = this.userCache.get(key);
+        if (cached) return cached === STATUS.NSFW;
 
-        if (this.userCache.has(cacheKey)) return false;
+        if (this.inFlightChecks.has(key)) return this.inFlightChecks.get(key)!;
 
-        if (userId === this.bot.botInfo.id) {
-            this.userCache.set(cacheKey, 'SAFE');
-            return false;
-        }
+        const promise = this.performProfileCheck(userId, chatId, key);
+        this.inFlightChecks.set(key, promise);
+        try { return await promise; } finally { this.inFlightChecks.delete(key); }
+    }
 
-        const admin = await this.isAdminOrOwner(chatId, userId);
-        if (admin) {
-            this.userCache.set(cacheKey, 'SAFE');
+    private async performProfileCheck(userId: number, chatId: number, key: string): Promise<boolean> {
+        if (userId === this.bot.botInfo.id) return false;
+
+        const isAdmin = await this.isAdminOrOwner(chatId, userId);
+        if (isAdmin) {
+            this.userCache.set(key, STATUS.SAFE);
             return false;
         }
 
         try {
-            const photos = await withTimeout(
-                this.bot.api.getUserProfilePhotos(userId, { limit: 1 }),
-                5000,
-                'getUserProfilePhotos'
-            );
-
+            const photos = await this.bot.api.getUserProfilePhotos(userId, { limit: 1 });
             if (photos.total_count === 0) {
-                this.userCache.set(cacheKey, 'SAFE');
+                this.userCache.set(key, STATUS.SAFE);
                 return false;
             }
 
-            const photoSizes = photos.photos[0];
-            const photo = photoSizes[photoSizes.length - 1];
-            if (!photo) {
-                this.userCache.set(cacheKey, 'SAFE');
-                return false;
-            }
-
+            const photo = photos.photos[0][photos.photos[0].length - 1];
             const base64 = await this.mediaHelper.downloadAsBase64(photo.file_id);
-            const aiStatus = await this.aiService.analyzeNSFW(base64);
+            const result = await this.aiService.analyzeNSFW(base64);
 
-            if (aiStatus === 'YES') {
-                await this.guardService.banUser(chatId, userId, 'NSFW Profile Photo');
-                this.userCache.set(cacheKey, 'NSFW');
+            if (result === STATUS.YES) {
+                this.guardService.banUser(chatId, userId, BOT_MESSAGES.BAN_REASON_PROFILE).catch(() => {});
+                this.userCache.set(key, STATUS.NSFW);
                 return true;
-            } else if (aiStatus === 'NO') {
-                this.userCache.set(cacheKey, 'SAFE');
             }
-
-        } catch (error) {
-            console.error('[Profile Check Error]:', (error as Error).message);
+            this.userCache.set(key, STATUS.SAFE);
+        } catch {
+            console.error('[Controller]: Profile check failed.');
         }
         return false;
     }

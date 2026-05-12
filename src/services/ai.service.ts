@@ -22,7 +22,8 @@ export class AIService {
   private static readonly MODEL_ORDER = ["gemini-2.0-flash"];
 
   constructor() {
-    this.requestQueue = new RequestQueue(2);
+    // Hardened: limit queue to 50 pending requests to prevent DoS via queue pileup
+    this.requestQueue = new RequestQueue(2, 50);
 
     const keys = [
       { raw: process.env.GOOGLE_API_KEY  || "", num: 1 },
